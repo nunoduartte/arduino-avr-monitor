@@ -1,0 +1,6 @@
+pyserial>=3.5
+rich>=13.0
+streamlit>=1.35
+pandas>=2.0
+pydantic>=2.0
+click>=8.1

@@ -1,0 +1,45 @@
+{
+  "ports": {
+    "PORTB": 32,
+    "PORTC": 0,
+    "PORTD": 128
+  },
+  "pins": {
+    "PINB": 32,
+    "PINC": 0,
+    "PIND": 128
+  },
+  "ddr": {
+    "DDRB": 32,
+    "DDRC": 0,
+    "DDRD": 0
+  },
+  "adc": {
+    "A0": 700,
+    "A1": 300,
+    "A2": 0,
+    "A3": 0,
+    "A4": 0,
+    "A5": 0
+  },
+  "flags": {
+    "SREG": 2
+  },
+  "memory_writes": [
+    {
+      "space": "sram",
+      "address": "0x0110",
+      "value": 66
+    },
+    {
+      "space": "eeprom",
+      "address": "0x0000",
+      "value": 17
+    },
+    {
+      "space": "flash",
+      "address": "0x0000",
+      "value": 222
+    }
+  ]
+}

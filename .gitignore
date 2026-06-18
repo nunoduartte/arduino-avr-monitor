@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Streamlit/local
+.streamlit/
+credentials.toml
+secrets.toml
+
+# Arquivo local de teste
+fake_state.json
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
