@@ -25,6 +25,12 @@
   "flags": {
     "SREG": 2
   },
+  "ula": {
+    "estado": 4,
+    "op": 4,
+    "x": 7,
+    "y": 3
+  },
   "memory_writes": [
     {
       "space": "sram",

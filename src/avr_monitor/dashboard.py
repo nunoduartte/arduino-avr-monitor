@@ -224,7 +224,126 @@ def _render_memory(snap: AVRSnapshot) -> None:
         )
 
 
+_ULA_ESTADO_LABELS = [
+    "Estado 0 — Selecionando operação (chaves B0-B2 → op 0-7)",
+    "Estado 1 — Entrando X via chaves D7-D10",
+    "Estado 2 — Entrando Y via chaves D7-D10",
+    "Estado 3 — Y nos LEDs; pressione D11 para calcular",
+    "Estado 4 — Resultado calculado e exibido nos LEDs",
+]
+
+_ULA_OP_SYMS = {
+    "AND": "&", "OR": "|", "NOT": "~Y", "XOR": "^",
+    "ADD": "+", "SUB": "−", "MUL": "×", "DIV": "÷",
+}
+
+
+def _render_ula(snap: AVRSnapshot) -> None:
+    ula = snap.ula
+    if ula is None:
+        return
+
+    st.subheader("ULA 4 bits — ATmega328P")
+
+    # Estado
+    estado_label = (
+        _ULA_ESTADO_LABELS[ula.estado]
+        if 0 <= ula.estado < len(_ULA_ESTADO_LABELS)
+        else f"Estado {ula.estado}"
+    )
+    st.info(estado_label)
+
+    # Equação principal em destaque
+    sym = _ULA_OP_SYMS.get(ula.op_name, ula.op_name)
+    eq  = f"~{ula.y}" if ula.op_name == "NOT" else f"{ula.x} {sym} {ula.y}"
+    carry_tag = "  ← carry" if ula.carry else ""
+    st.markdown(
+        f"<div style='text-align:center;font-size:2em;font-family:monospace;"
+        f"color:#00e676;padding:6px'><b>{eq} = {ula.result}{carry_tag}</b></div>",
+        unsafe_allow_html=True,
+    )
+
+    # Linha de valores: X  |  OP  |  Y  |  =  |  Result  |  Carry
+    c1, c2, c3, c4, c5, c6 = st.columns([2, 1, 2, 0.4, 2, 1])
+
+    with c1:
+        st.markdown(f"**X = {ula.x}**")
+        st.markdown(_bits_html(ula.x, 4), unsafe_allow_html=True)
+        st.caption(f"0x{ula.x:X}  |  {ula.x:04b}b  |  {ula.addr_x}")
+
+    with c2:
+        st.markdown(
+            f"<div style='text-align:center;font-size:2.5em;color:#00e676;"
+            f"padding-top:4px'><b>{sym}</b></div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{ula.op_name}  ({ula.op_code}b)")
+
+    with c3:
+        st.markdown(f"**Y = {ula.y}**")
+        st.markdown(_bits_html(ula.y, 4), unsafe_allow_html=True)
+        st.caption(f"0x{ula.y:X}  |  {ula.y:04b}b  |  {ula.addr_y}")
+
+    with c4:
+        st.markdown(
+            "<div style='text-align:center;font-size:2.5em;color:#666;"
+            "padding-top:4px'><b>=</b></div>",
+            unsafe_allow_html=True,
+        )
+
+    with c5:
+        st.markdown(f"**Resultado = {ula.result}**")
+        st.markdown(_bits_html(ula.result, 4), unsafe_allow_html=True)
+        st.caption(f"0x{ula.result:X}  |  {ula.result:04b}b  |  {ula.addr_result}")
+
+    with c6:
+        carry_color = "#ff6b35" if ula.carry else "#444"
+        st.markdown(
+            f"<div style='text-align:center;font-size:1.5em;color:{carry_color};"
+            f"border:1px solid {carry_color};border-radius:6px;padding:6px 2px'>"
+            f"<b>CY</b><br>{ula.carry}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(ula.addr_carry)
+
+    # Correlação pinos ↔ registradores AVR
+    with st.expander("Correlação pinos ↔ registradores AVR", expanded=False):
+        portd = snap.ports.PORTD
+        pinb  = snap.pins.PINB
+        pind  = snap.pins.PIND
+
+        rows = [
+            ("D2",  "PORTD", "2", "LED B0 — resultado bit 0", (ula.result >> 0) & 1, (portd >> 2) & 1),
+            ("D3",  "PORTD", "3", "LED B1 — resultado bit 1", (ula.result >> 1) & 1, (portd >> 3) & 1),
+            ("D4",  "PORTD", "4", "LED B2 — resultado bit 2", (ula.result >> 2) & 1, (portd >> 4) & 1),
+            ("D5",  "PORTD", "5", "LED B3 — resultado bit 3", (ula.result >> 3) & 1, (portd >> 5) & 1),
+            ("D6",  "PORTD", "6", "LED Carry",                ula.carry,             (portd >> 6) & 1),
+            ("D7",  "PIND",  "7", "Chave B0 (INPUT_PULLUP)",  "—",                  (pind >> 7) & 1),
+            ("D8",  "PINB",  "0", "Chave B1 (INPUT_PULLUP)",  "—",                  (pinb >> 0) & 1),
+            ("D9",  "PINB",  "1", "Chave B2 (INPUT_PULLUP)",  "—",                  (pinb >> 1) & 1),
+            ("D10", "PINB",  "2", "Chave B3 (INPUT_PULLUP)",  "—",                  (pinb >> 2) & 1),
+            ("D11", "PINB",  "3", "Botão (pull-down externo)", "—",                 (pinb >> 3) & 1),
+        ]
+        df = pd.DataFrame(rows, columns=["Pino", "Reg", "Bit", "Função", "Esperado", "Lido"])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        expected_bits = ((ula.result & 0xF) << 2) | (ula.carry << 6)
+        actual_bits   = portd & 0x7C    # bits 2-6
+        match = "OK" if actual_bits == expected_bits else (
+            f"divergência — esperado 0x{expected_bits:02X}, atual 0x{actual_bits:02X}"
+        )
+        st.caption(f"PORTD = 0x{portd:02X}  |  LEDs (bits 2-6): {match}")
+        st.caption(
+            f"Endereços SRAM:  estado={ula.addr_estado}  "
+            f"x={ula.addr_x}  y={ula.addr_y}  "
+            f"result={ula.addr_result}  carry={ula.addr_carry}"
+        )
+
+
 def _render_snap(snap: AVRSnapshot) -> None:
+    if snap.ula is not None:
+        _render_ula(snap)
+        st.divider()
     _render_regs(snap)
     st.divider()
     _render_timers(snap)

@@ -3,6 +3,22 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class ULASnapshot(BaseModel):
+    estado: int = 0           # 0=sel_op 1=entrada_x 2=entrada_y 3=aguarda 4=resultado
+    op: int = 0               # índice da operação (0-7)
+    op_name: str = "AND"      # AND OR NOT XOR ADD SUB MUL DIV
+    op_code: str = "000"      # código binário de 3 bits (string, ex: "100")
+    x: int = 0                # operando A (4 bits)
+    y: int = 0                # operando B (4 bits)
+    result: int = 0           # resultado (4 bits)
+    carry: int = 0            # carry/overflow (1 bit)
+    addr_estado: str = "0x0000"
+    addr_x: str = "0x0000"
+    addr_y: str = "0x0000"
+    addr_result: str = "0x0000"
+    addr_carry: str = "0x0000"
+
+
 class PortsSnapshot(BaseModel):
     PORTB: int = 0
     PORTC: int = 0
@@ -68,3 +84,4 @@ class AVRSnapshot(BaseModel):
     adc: ADCSnapshot = Field(default_factory=ADCSnapshot)
     flags: FlagsSnapshot = Field(default_factory=FlagsSnapshot)
     memory: MemorySnapshot = Field(default_factory=MemorySnapshot)
+    ula: Optional[ULASnapshot] = None   # presente apenas no firmware ULA

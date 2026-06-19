@@ -17,7 +17,26 @@ from .models import (
     PinsSnapshot,
     PortsSnapshot,
     TimersSnapshot,
+    ULASnapshot,
 )
+
+_ULA_OP_NAMES = ["AND", "OR", "NOT", "XOR", "ADD", "SUB", "MUL", "DIV"]
+_ULA_OP_CODES = ["000", "001", "010", "011", "100", "101", "110", "111"]
+
+
+def _compute_ula(x: int, y: int, op: int) -> "tuple[int, int]":
+    """Calcula a ULA de 4 bits. Retorna (result & 0xF, carry). Espelha calcular() do ula_final_3.py."""
+    x, y, carry = x & 0xF, y & 0xF, 0
+    if op == 0:   res = x & y
+    elif op == 1: res = x | y
+    elif op == 2: res = (~y) & 0xF            # NOT Y (não X!)
+    elif op == 3: res = x ^ y
+    elif op == 4: s = x + y;  res = s; carry = 1 if s > 15 else 0
+    elif op == 5: res = (x - y) if x >= y else 0   # SUB clampado, sem borrow
+    elif op == 6: s = x * y;  res = s; carry = 1 if s > 15 else 0
+    elif op == 7: res = x // y if y else 0
+    else:         res = 0
+    return res & 0xF, carry
 
 # Caminho do arquivo de controle (relativo ao diretório de trabalho atual)
 FAKE_STATE_FILE = Path("fake_state.json")
@@ -136,11 +155,10 @@ class FakeSerialClient(BaseClient):
         self._eeprom = bytearray([0xFF] * EEPROM_SIZE)
         self._flash  = bytearray(FLASH_SIZE)
 
-        # Marcadores fixos na SRAM (índice = endereço físico − SRAM_BASE)
-        self._sram[0x00] = 0xAA   # endereço físico 0x0100
-        self._sram[0x01] = 0xBB   # endereço físico 0x0101
-        self._sram[0x02] = 0xCC   # endereço físico 0x0102
-        # índice 0x10 (física 0x0110) reservado para contador variável
+        # Layout SRAM simulado (espelha o firmware ULA):
+        #   índice 0x00-0x05 (física 0x0100-0x0105) = variáveis ULA: x,y,result,carry,op,estado
+        #   índice 0x10      (física 0x0110)         = contador variável
+        # (bytearray já inicializado com zeros; atualizado em _next_snapshot)
 
         # Assinatura conhecida na FLASH
         self._flash[0] = 0xDE
@@ -184,7 +202,9 @@ class FakeSerialClient(BaseClient):
         portc = 0x00
         portd = 0x00
         pinb, pinc, pind = portb, portc, portd
-        ddrb, ddrc, ddrd = 0x20, 0x00, 0x00
+        ddrb  = 0x7E          # D2-D6 (LEDs) + D13 como saída
+        ddrc  = 0x00
+        ddrd  = 0x7C          # D2-D6 como saída
         adc: Dict[str, int] = {
             "A0": int(512 + 511 * math.sin(t)),
             "A1": int(512 + 511 * math.cos(t * 1.3)),
@@ -193,12 +213,17 @@ class FakeSerialClient(BaseClient):
             "A4": 0,
             "A5": 0,
         }
-        sreg_val = 0x80   # I=1, demais=0 (interrupções habilitadas, sem flags ativas)
+        sreg_val = 0x80   # I=1, demais=0
+
+        # ── ULA: estado simulado cycling ──────────────────────────────────────
+        ula_op     = int(t * 0.15) % 8
+        ula_x      = 7
+        ula_y      = self._counter % 16
+        ula_estado = 4   # sempre mostrando resultado em modo fake
 
         # ── Carrega e aplica fake_state.json ──────────────────────────────────
         state = _load_fake_state()
         if state is not None:
-            # memory_writes primeiro para que os bytes apareçam no dump do frame
             self._apply_memory_writes(state.get("memory_writes", []))
 
             p = state.get("ports", {})
@@ -219,17 +244,39 @@ class FakeSerialClient(BaseClient):
             a = state.get("adc", {})
             for ch in ("A0", "A1", "A2", "A3", "A4", "A5"):
                 if ch in a:
-                    adc[ch] = int(a[ch]) & 0x3FF   # 10 bits: 0–1023
+                    adc[ch] = int(a[ch]) & 0x3FF
 
             f = state.get("flags", {})
             if "SREG" in f:
                 sreg_val = int(f["SREG"]) & 0xFF
 
+            u = state.get("ula", {})
+            if u:
+                ula_estado = int(u.get("estado", ula_estado))
+                ula_op     = int(u.get("op",     ula_op)) % 8
+                ula_x      = int(u.get("x",      ula_x)) & 0xF
+                ula_y      = int(u.get("y",      ula_y)) & 0xF
+
+        # ── Calcula resultado da ULA ──────────────────────────────────────────
+        ula_result, ula_carry = _compute_ula(ula_x, ula_y, ula_op)
+
+        # Atualiza SRAM fake com as variáveis da ULA (espelha layout do firmware)
+        self._sram[0x00] = ula_x
+        self._sram[0x01] = ula_y
+        self._sram[0x02] = ula_result
+        self._sram[0x03] = ula_carry
+        self._sram[0x04] = ula_op
+        self._sram[0x05] = ula_estado
+
+        # Atualiza PORTD com estado dos LEDs (D2-D5 = resultado, D6 = carry)
+        led_bits = ((ula_result & 0xF) << 2) | (ula_carry << 6)
+        portd = (portd & 0x83) | led_bits   # preserva bits 0,1,7
+
         # ── Lê blocos reais das arrays ────────────────────────────────────────
-        sram_phys   = SRAM_BASE + self._sram_offset
-        sram_block  = list(self._sram  [self._sram_offset   : self._sram_offset   + BLOCK_SIZE])
-        eeprom_block= list(self._eeprom[self._eeprom_offset : self._eeprom_offset + BLOCK_SIZE])
-        flash_block = list(self._flash [self._flash_offset  : self._flash_offset  + BLOCK_SIZE])
+        sram_phys    = SRAM_BASE + self._sram_offset
+        sram_block   = list(self._sram  [self._sram_offset   : self._sram_offset   + BLOCK_SIZE])
+        eeprom_block = list(self._eeprom[self._eeprom_offset : self._eeprom_offset + BLOCK_SIZE])
+        flash_block  = list(self._flash [self._flash_offset  : self._flash_offset  + BLOCK_SIZE])
 
         snap = AVRSnapshot(
             timestamp_ms=ms,
@@ -256,6 +303,21 @@ class FakeSerialClient(BaseClient):
                     start=f"0x{self._flash_offset:04X}",
                     bytes=flash_block,
                 ),
+            ),
+            ula=ULASnapshot(
+                estado=ula_estado,
+                op=ula_op,
+                op_name=_ULA_OP_NAMES[ula_op],
+                op_code=_ULA_OP_CODES[ula_op],
+                x=ula_x,
+                y=ula_y,
+                result=ula_result,
+                carry=ula_carry,
+                addr_estado="0x0105",
+                addr_x="0x0100",
+                addr_y="0x0101",
+                addr_result="0x0102",
+                addr_carry="0x0103",
             ),
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import List
 
 import click
 from rich.columns import Columns
@@ -16,11 +17,27 @@ from .formatters import (
     parse_hex_addr,
     to_bits,
 )
-from .models import AVRSnapshot
+from .models import AVRSnapshot, ULASnapshot
 from .serial_client import make_client
 
 console = Console()
 
+# ── Constantes ULA ────────────────────────────────────────────────────────────
+
+_ULA_OPS = [
+    ("AND", "000"), ("OR",  "001"), ("NOT", "010"), ("XOR", "011"),
+    ("ADD", "100"), ("SUB", "101"), ("MUL", "110"), ("DIV", "111"),
+]
+
+_ULA_OP_SYMS = {
+    "AND": "&", "OR": "|", "NOT": "~Y", "XOR": "^",
+    "ADD": "+", "SUB": "-", "MUL": "*", "DIV": "/",
+}
+
+_ESTADO_COLORS = {0: "cyan", 1: "yellow", 2: "yellow", 3: "orange3", 4: "green"}
+
+
+# ── Helpers de bits ───────────────────────────────────────────────────────────
 
 def _bit_bar(value: int, width: int = 8) -> Text:
     bits = to_bits(value, width)
@@ -32,6 +49,15 @@ def _bit_bar(value: int, width: int = 8) -> Text:
             text.append("░", style="dim")
     return text
 
+
+def _switches_display(val4: int) -> str:
+    """Mostra switches D10-D7 como ■/— com legenda de pinos."""
+    bits = f"{val4:04b}"   # bit3=D10 … bit0=D7
+    syms = "  ".join("■" if b == "1" else "—" for b in bits)
+    return f"  D10  D9   D8   D7\n   {syms}"
+
+
+# ── Tabelas dos registradores AVR ─────────────────────────────────────────────
 
 def _reg_table(snap: AVRSnapshot) -> Table:
     t = Table(title="Registradores PORT / PIN / DDR", show_header=True, header_style="bold cyan")
@@ -77,12 +103,8 @@ def _adc_table(snap: AVRSnapshot) -> Table:
     t.add_column("Barra", width=20)
 
     adc_vals = {
-        "A0": snap.adc.A0,
-        "A1": snap.adc.A1,
-        "A2": snap.adc.A2,
-        "A3": snap.adc.A3,
-        "A4": snap.adc.A4,
-        "A5": snap.adc.A5,
+        "A0": snap.adc.A0, "A1": snap.adc.A1, "A2": snap.adc.A2,
+        "A3": snap.adc.A3, "A4": snap.adc.A4, "A5": snap.adc.A5,
     }
     for ch, val in adc_vals.items():
         volts = f"{val * 5.0 / 1023:.3f} V"
@@ -95,14 +117,8 @@ def _adc_table(snap: AVRSnapshot) -> Table:
 def _sreg_table(snap: AVRSnapshot) -> Table:
     t = Table(title=f"SREG = 0x{snap.flags.SREG:02X}", header_style="bold cyan")
     flag_vals = {
-        "I": snap.flags.I,
-        "T": snap.flags.T,
-        "H": snap.flags.H,
-        "S": snap.flags.S,
-        "V": snap.flags.V,
-        "N": snap.flags.N,
-        "Z": snap.flags.Z,
-        "C": snap.flags.C,
+        "I": snap.flags.I, "T": snap.flags.T, "H": snap.flags.H, "S": snap.flags.S,
+        "V": snap.flags.V, "N": snap.flags.N, "Z": snap.flags.Z, "C": snap.flags.C,
     }
     for flag in flag_vals:
         t.add_column(flag, width=4, justify="center")
@@ -117,36 +133,140 @@ def _sreg_table(snap: AVRSnapshot) -> Table:
 
 
 def _mem_panel(snap: AVRSnapshot) -> Panel:
-    sram_addr = parse_hex_addr(snap.memory.sram.start)
+    sram_addr  = parse_hex_addr(snap.memory.sram.start)
     eeprom_addr = parse_hex_addr(snap.memory.eeprom.start)
-    flash_addr = parse_hex_addr(snap.memory.flash.start)
-
-    sram_dump = format_hex_dump(sram_addr, snap.memory.sram.bytes)
-    eeprom_dump = format_hex_dump(eeprom_addr, snap.memory.eeprom.bytes)
-    flash_dump = format_hex_dump(flash_addr, snap.memory.flash.bytes)
+    flash_addr  = parse_hex_addr(snap.memory.flash.start)
 
     content = (
         "[bold yellow]SRAM[/bold yellow]\n"
-        f"[dim]{sram_dump}[/dim]\n\n"
+        f"[dim]{format_hex_dump(sram_addr,   snap.memory.sram.bytes)}[/dim]\n\n"
         "[bold yellow]EEPROM[/bold yellow]\n"
-        f"[dim]{eeprom_dump}[/dim]\n\n"
+        f"[dim]{format_hex_dump(eeprom_addr, snap.memory.eeprom.bytes)}[/dim]\n\n"
         "[bold yellow]FLASH[/bold yellow]\n"
-        f"[dim]{flash_dump}[/dim]"
+        f"[dim]{format_hex_dump(flash_addr,  snap.memory.flash.bytes)}[/dim]"
     )
     return Panel(content, title="Dump de Memória", border_style="blue")
 
 
-def build_layout(snap: AVRSnapshot, fake: bool) -> Table:
-    root = Table.grid(padding=1)
-    root.add_column()
+# ── Painel ULA ────────────────────────────────────────────────────────────────
 
+def _ula_transition_msg(ula: ULASnapshot, prev_estado: int) -> str:
+    """Gera uma mensagem legível para uma transição de estado."""
+    estado = ula.estado
+    sym = _ULA_OP_SYMS.get(ula.op_name, ula.op_name)
+
+    if prev_estado == 0 and estado == 1:
+        return f"✔  Operação confirmada: {ula.op_name}  (código {ula.op_code}b)"
+    if prev_estado == 1 and estado == 2:
+        return f"✔  X confirmado: {ula.x}  ({ula.x:04b}b)"
+    if prev_estado == 2 and estado == 3:
+        return f"✔  Y confirmado: {ula.y}  ({ula.y:04b}b)"
+    if prev_estado == 3 and estado == 4:
+        eq    = f"~{ula.y}" if ula.op_name == "NOT" else f"{ula.x} {sym} {ula.y}"
+        carry = "  CARRY!" if ula.carry else ""
+        return f"✔  Resultado: {eq} = {ula.result}{carry}"
+    if prev_estado == 4 and estado == 0:
+        return "↺  Reiniciando — nova operação"
+    return f"Estado {prev_estado} → {estado}"
+
+
+def _ula_panel(snap: AVRSnapshot, log: List[str]) -> Panel:
+    ula   = snap.ula
+    if ula is None:
+        return Panel("sem dados", title="ULA")
+
+    estado = ula.estado
+    color  = _ESTADO_COLORS.get(estado, "white")
+    sym    = _ULA_OP_SYMS.get(ula.op_name, ula.op_name)
+    parts: List[str] = []
+
+    # ── Cabeçalho do estado ───────────────────────────────────────────────────
+    estado_labels = [
+        "Selecionando operação",
+        "Entrando X",
+        "Entrando Y",
+        "Aguardando cálculo",
+        "Resultado",
+    ]
+    label = estado_labels[estado] if 0 <= estado < 5 else f"Estado {estado}"
+    parts.append(f"[bold {color}]◆ Estado {estado} — {label}[/bold {color}]")
+    parts.append("")
+
+    # ── Conteúdo específico de cada estado ────────────────────────────────────
+    if estado == 0:
+        parts.append("Configure [bold]D9 D8 D7[/bold] com o código da operação e pressione [bold]D11[/bold]:")
+        parts.append("")
+        parts.append(f"  {'Op':<6}{'Cód':<7}D9   D8   D7")
+        parts.append(f"  {'─'*6}{'─'*7}{'─'*5}{'─'*5}{'─'*5}")
+        for i, (name, code) in enumerate(_ULA_OPS):
+            d = ["■" if c == "1" else "—" for c in code]
+            is_cur = (i == ula.op)
+            arrow = "  ◄ atual" if is_cur else ""
+            row = f"  {name:<6}{code:<7}{d[0]:<5}{d[1]:<5}{d[2]}{arrow}"
+            if is_cur:
+                parts.append(f"[bold green]{row}[/bold green]")
+            else:
+                parts.append(row)
+
+    elif estado in (1, 2):
+        val  = ula.x if estado == 1 else ula.y
+        name = "X" if estado == 1 else "Y"
+        parts.append(f"Configure [bold]D10 D9 D8 D7[/bold] com {name} (4 bits) e pressione [bold]D11[/bold]:")
+        parts.append("")
+        parts.append(f"[dim]{_switches_display(val)}[/dim]")
+        parts.append("")
+        parts.append(f"  {name} = [bold green]{val}[/bold green]  "
+                     f"({val:04b}b  |  0x{val:X}  |  decimal {val})")
+
+    elif estado == 3:
+        parts.append(f"Y = [bold]{ula.y}[/bold] ({ula.y:04b}b) travado nos LEDs [bold]D2-D5[/bold].")
+        parts.append("")
+        parts.append("Pressione [bold]D11[/bold] para calcular o resultado.")
+
+    elif estado == 4:
+        eq = f"~{ula.y}" if ula.op_name == "NOT" else f"{ula.x} {sym} {ula.y}"
+        carry_tag = "  [bold red]CARRY (D6 aceso)[/bold red]" if ula.carry else ""
+        parts.append(f"  [bold green]{eq} = {ula.result}[/bold green]{carry_tag}")
+        parts.append("")
+        # LEDs individuais
+        leds = []
+        for bit in range(3, -1, -1):
+            pin = bit + 2       # D2=bit0 … D5=bit3
+            on  = (ula.result >> bit) & 1
+            leds.append(f"D{pin}={'■' if on else '—'}")
+        parts.append("  LEDs: " + "  ".join(leds) + f"  D6(carry)={'■' if ula.carry else '—'}")
+        parts.append("")
+        parts.append("[dim]Pressione D11 para reiniciar.[/dim]")
+
+    # ── Histórico de transições ───────────────────────────────────────────────
+    if log:
+        parts.append("")
+        parts.append("[dim]─── Histórico ─────────────────────────────────────────────[/dim]")
+        for entry in log[-6:]:
+            parts.append(f"[dim]  {entry}[/dim]")
+
+    content = "\n".join(parts)
+    return Panel(content, title="[bold]ULA 4 bits[/bold]", border_style=color)
+
+
+# ── Layouts ───────────────────────────────────────────────────────────────────
+
+def _header_panel(snap: AVRSnapshot, fake: bool) -> Panel:
     mode_tag = "[bold red][SIMULADO][/bold red]" if fake else "[bold green][SERIAL][/bold green]"
-    header = Panel(
+    return Panel(
         f"{mode_tag}  t={snap.timestamp_ms} ms",
         title="[bold]AVR Monitor — ATmega328P[/bold]",
         border_style="bright_blue",
     )
-    root.add_row(header)
+
+
+def build_layout(snap: AVRSnapshot, fake: bool, ula_log: List[str] | None = None) -> Table:
+    """Layout completo: ULA (se presente) + todas as tabelas de registradores."""
+    root = Table.grid(padding=1)
+    root.add_column()
+    root.add_row(_header_panel(snap, fake))
+    if snap.ula is not None:
+        root.add_row(_ula_panel(snap, ula_log or []))
     root.add_row(Columns([_reg_table(snap), _timer_table(snap)]))
     root.add_row(_adc_table(snap))
     root.add_row(_sreg_table(snap))
@@ -154,19 +274,56 @@ def build_layout(snap: AVRSnapshot, fake: bool) -> Table:
     return root
 
 
+def build_ula_only(snap: AVRSnapshot, fake: bool, ula_log: List[str] | None = None) -> Table:
+    """Layout reduzido: só o painel da ULA (sem registradores, ADC, memória)."""
+    root = Table.grid(padding=1)
+    root.add_column()
+    root.add_row(_header_panel(snap, fake))
+    if snap.ula is not None:
+        root.add_row(_ula_panel(snap, ula_log or []))
+    else:
+        root.add_row(Panel(
+            "[dim]Aguardando dados da ULA...\n"
+            "Certifique-se de que o firmware ula_avr_monitor_firmware está carregado.[/dim]",
+            title="[bold]ULA 4 bits[/bold]",
+            border_style="dim",
+        ))
+    return root
+
+
+# ── Comando principal ─────────────────────────────────────────────────────────
+
 @click.command()
-@click.option("--port", default="/dev/ttyACM0", show_default=True, help="Porta serial.")
-@click.option("--baud", default=115200, show_default=True, help="Baud rate.")
-@click.option("--fake", is_flag=True, default=False, help="Modo simulado (sem Arduino).")
-@click.option("--interval", default=0.5, show_default=True, help="Intervalo de atualização (s).")
-def main(port: str, baud: int, fake: bool, interval: float) -> None:
+@click.option("--port",      default="/dev/ttyACM0", show_default=True, help="Porta serial.")
+@click.option("--baud",      default=115200,          show_default=True, help="Baud rate.")
+@click.option("--fake",      is_flag=True, default=False,                help="Modo simulado (sem Arduino).")
+@click.option("--interval",  default=0.5,             show_default=True, help="Intervalo de atualização (s).")
+@click.option("--ula-only",  is_flag=True, default=False,
+              help="Mostra apenas o painel ULA (sem registradores/ADC/memória).")
+def main(port: str, baud: int, fake: bool, interval: float, ula_only: bool) -> None:
     """Monitor de registradores AVR do Arduino Uno."""
     client = make_client(fake=fake, port=port, baud=baud, interval=interval)
+
+    ula_log: List[str] = []
+    prev_estado: int   = -1   # -1 = ainda não recebeu nenhum frame
 
     try:
         with Live(console=console, refresh_per_second=4, screen=True) as live:
             for snap in client.snapshots():
-                live.update(build_layout(snap, fake))
+                # Detecta transição de estado e registra no histórico
+                if snap.ula is not None:
+                    estado = snap.ula.estado
+                    if prev_estado >= 0 and estado != prev_estado:
+                        msg = _ula_transition_msg(snap.ula, prev_estado)
+                        ula_log.append(f"[t={snap.timestamp_ms}ms]  {msg}")
+                        if len(ula_log) > 8:
+                            ula_log.pop(0)
+                    prev_estado = estado
+
+                if ula_only:
+                    live.update(build_ula_only(snap, fake, ula_log))
+                else:
+                    live.update(build_layout(snap, fake, ula_log))
     except KeyboardInterrupt:
         pass
     finally:
