@@ -1,18 +1,18 @@
 {
   "ports": {
-    "PORTB": 32,
+    "PORTB": 7,
     "PORTC": 0,
-    "PORTD": 128
+    "PORTD": 130
   },
   "pins": {
-    "PINB": 32,
+    "PINB": 7,
     "PINC": 0,
-    "PIND": 128
+    "PIND": 131
   },
   "ddr": {
-    "DDRB": 32,
+    "DDRB": 0,
     "DDRC": 0,
-    "DDRD": 0
+    "DDRD": 124
   },
   "adc": {
     "A0": 700,

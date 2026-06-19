@@ -17,6 +17,7 @@ class ULASnapshot(BaseModel):
     addr_y: str = "0x0000"
     addr_result: str = "0x0000"
     addr_carry: str = "0x0000"
+    addr_op: str = "0x0000"
 
 
 class PortsSnapshot(BaseModel):

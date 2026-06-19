@@ -23,7 +23,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from src.avr_monitor.formatters import format_hex_dump, parse_hex_addr, to_bits
+from src.avr_monitor.formatters import format_hex_dump, parse_hex_addr, to_bits, ula_memory_check
 from src.avr_monitor.models import AVRSnapshot
 from src.avr_monitor.serial_client import (
     FAKE_STATE_FILE,
@@ -309,30 +309,40 @@ def _render_ula(snap: AVRSnapshot) -> None:
     # Correlação pinos ↔ registradores AVR
     with st.expander("Correlação pinos ↔ registradores AVR", expanded=False):
         portd = snap.ports.PORTD
+        ddrd  = snap.ddr.DDRD
         pinb  = snap.pins.PINB
         pind  = snap.pins.PIND
 
         rows = [
+            # Direção dos LEDs (DDRD bits 2-6 devem ser 1 = OUTPUT)
+            ("D2–D6", "DDRD", "2–6", "Direção LEDs (OUTPUT=1, esperado 0x7C)",
+             f"0x{0x7C:02X}", f"0x{ddrd & 0x7C:02X}"),
+            # Estado dos LEDs (PORTD bits 2-6 devem refletir resultado + carry)
             ("D2",  "PORTD", "2", "LED B0 — resultado bit 0", (ula.result >> 0) & 1, (portd >> 2) & 1),
             ("D3",  "PORTD", "3", "LED B1 — resultado bit 1", (ula.result >> 1) & 1, (portd >> 3) & 1),
             ("D4",  "PORTD", "4", "LED B2 — resultado bit 2", (ula.result >> 2) & 1, (portd >> 4) & 1),
             ("D5",  "PORTD", "5", "LED B3 — resultado bit 3", (ula.result >> 3) & 1, (portd >> 5) & 1),
             ("D6",  "PORTD", "6", "LED Carry",                ula.carry,             (portd >> 6) & 1),
-            ("D7",  "PIND",  "7", "Chave B0 (INPUT_PULLUP)",  "—",                  (pind >> 7) & 1),
-            ("D8",  "PINB",  "0", "Chave B1 (INPUT_PULLUP)",  "—",                  (pinb >> 0) & 1),
-            ("D9",  "PINB",  "1", "Chave B2 (INPUT_PULLUP)",  "—",                  (pinb >> 1) & 1),
-            ("D10", "PINB",  "2", "Chave B3 (INPUT_PULLUP)",  "—",                  (pinb >> 2) & 1),
-            ("D11", "PINB",  "3", "Botão (pull-down externo)", "—",                 (pinb >> 3) & 1),
+            # Entradas (chaves e botão)
+            ("D7",  "PIND",  "7", "Chave B0 (INPUT_PULLUP — 1=aberta)",  "—", (pind >> 7) & 1),
+            ("D8",  "PINB",  "0", "Chave B1 (INPUT_PULLUP — 1=aberta)",  "—", (pinb >> 0) & 1),
+            ("D9",  "PINB",  "1", "Chave B2 (INPUT_PULLUP — 1=aberta)",  "—", (pinb >> 1) & 1),
+            ("D10", "PINB",  "2", "Chave B3 (INPUT_PULLUP — 1=aberta)",  "—", (pinb >> 2) & 1),
+            ("D11", "PINB",  "3", "Botão (pull-down externo — 1=pres.)", "—", (pinb >> 3) & 1),
         ]
         df = pd.DataFrame(rows, columns=["Pino", "Reg", "Bit", "Função", "Esperado", "Lido"])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         expected_bits = ((ula.result & 0xF) << 2) | (ula.carry << 6)
-        actual_bits   = portd & 0x7C    # bits 2-6
-        match = "OK" if actual_bits == expected_bits else (
-            f"divergência — esperado 0x{expected_bits:02X}, atual 0x{actual_bits:02X}"
-        )
-        st.caption(f"PORTD = 0x{portd:02X}  |  LEDs (bits 2-6): {match}")
+        actual_bits   = portd & 0x7C
+        leds_ok  = actual_bits == expected_bits
+        ddrd_ok  = (ddrd & 0x7C) == 0x7C
+
+        leds_msg = "OK" if leds_ok else f"divergência — esperado 0x{expected_bits:02X}, atual 0x{actual_bits:02X}"
+        ddrd_msg = "OK (D2-D6 como OUTPUT)" if ddrd_ok else f"DDRD bits 2-6 incorretos — esperado 0x7C, lido 0x{ddrd & 0x7C:02X}"
+
+        st.caption(f"PORTD = 0x{portd:02X}  |  LEDs (bits 2-6): {leds_msg}")
+        st.caption(f"DDRD  = 0x{ddrd:02X}  |  Direção LEDs: {ddrd_msg}")
         st.caption(
             f"Endereços SRAM:  estado={ula.addr_estado}  "
             f"x={ula.addr_x}  y={ula.addr_y}  "
@@ -340,9 +350,60 @@ def _render_ula(snap: AVRSnapshot) -> None:
         )
 
 
+def _render_ula_memcheck(snap: AVRSnapshot) -> None:
+    check = ula_memory_check(snap)
+    if check is None:
+        return
+
+    with st.expander(
+        "🔍 Verificação: variáveis da ULA na SRAM",
+        expanded=check["any_in_window"],
+    ):
+        st.caption(
+            f"Janela atual do dump rotativo: "
+            f"0x{check['window_start']:04X} – 0x{check['window_end']:04X}"
+        )
+
+        if not check["any_in_window"]:
+            st.warning(
+                "Nenhum endereço da ULA está na janela atual do dump. "
+                "Aguarde a varredura rotativa alcançar 0x0100–0x0105 "
+                "(ou recarregue a página em alguns segundos)."
+            )
+
+        rows = []
+        for f in check["fields"]:
+            if f["in_window"]:
+                status = "✅ OK" if f["match"] else "❌ DIVERGE"
+                lido = f["actual"]
+            else:
+                status = "⏳ fora da janela"
+                lido = "—"
+            rows.append({
+                "Variável": f["name"],
+                "Endereço": f"0x{f['addr']:04X}",
+                "Valor reportado (campo ula.*)": f["expected"],
+                "Valor lido no dump de SRAM": lido,
+                "Status": status,
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if check["any_in_window"]:
+            all_ok = all(f["match"] for f in check["fields"] if f["in_window"])
+            if all_ok:
+                st.success(
+                    "Os bytes lidos diretamente da SRAM coincidem com os valores "
+                    "reportados pela ULA — confirma que as variáveis realmente "
+                    "residem nesses endereços de memória."
+                )
+            else:
+                st.error("Divergência encontrada — verifique o firmware/endereços.")
+
+
 def _render_snap(snap: AVRSnapshot) -> None:
     if snap.ula is not None:
         _render_ula(snap)
+        _render_ula_memcheck(snap)
         st.divider()
     _render_regs(snap)
     st.divider()

@@ -1,5 +1,8 @@
 from __future__ import annotations
-from typing import List
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from .models import AVRSnapshot
 
 
 def to_bits(value: int, width: int = 8) -> str:
@@ -46,3 +49,58 @@ def parse_hex_addr(addr_str: str) -> int:
 
 
 SREG_BIT_NAMES = ["I", "T", "H", "S", "V", "N", "Z", "C"]
+
+
+def ula_memory_check(snap: "AVRSnapshot") -> Optional[dict]:
+    """
+    Verifica se a janela atual do dump rotativo de SRAM cobre os endereços das
+    variáveis da ULA (x, y, result, carry, op, estado) e, quando cobre, compara
+    byte a byte o valor lido no dump com o valor reportado nos campos `ula.*`.
+
+    Não interfere na varredura — só observa o que já está em `snap.memory.sram`
+    e `snap.ula` e calcula a sobreposição. Retorna None se o snapshot não tiver
+    seção ULA (ex: firmware avr_monitor_firmware original).
+    """
+    if snap.ula is None:
+        return None
+
+    ula = snap.ula
+    win_start = parse_hex_addr(snap.memory.sram.start)
+    win_bytes = snap.memory.sram.bytes
+    win_end   = win_start + len(win_bytes) - 1
+
+    fields = [
+        ("x",      ula.addr_x,      ula.x),
+        ("y",      ula.addr_y,      ula.y),
+        ("result", ula.addr_result, ula.result),
+        ("carry",  ula.addr_carry,  ula.carry),
+        ("op",     ula.addr_op,     ula.op),
+        ("estado", ula.addr_estado, ula.estado),
+    ]
+
+    rows = []
+    any_in_window = False
+    for name, addr_str, expected in fields:
+        addr = parse_hex_addr(addr_str)
+        in_window = win_start <= addr <= win_end
+        actual = None
+        match = None
+        if in_window:
+            any_in_window = True
+            actual = win_bytes[addr - win_start]
+            match = actual == expected
+        rows.append({
+            "name": name,
+            "addr": addr,
+            "in_window": in_window,
+            "expected": expected,
+            "actual": actual,
+            "match": match,
+        })
+
+    return {
+        "window_start": win_start,
+        "window_end": win_end,
+        "any_in_window": any_in_window,
+        "fields": rows,
+    }

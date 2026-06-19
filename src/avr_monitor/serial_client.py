@@ -44,7 +44,7 @@ FAKE_STATE_FILE = Path("fake_state.json")
 SRAM_SIZE   = 2048
 EEPROM_SIZE = 1024
 FLASH_SIZE  = 32768
-BLOCK_SIZE  = 16
+BLOCK_SIZE  = 64   # ↑ de 16 para 64: varredura completa da SRAM em ~16s (era ~64s), espelha o firmware
 SRAM_BASE   = 0x0100   # endereço físico onde a SRAM de dados começa no ATmega328P
 
 
@@ -197,14 +197,21 @@ class FakeSerialClient(BaseClient):
         self._counter = (self._counter + 1) & 0xFF
         self._sram[0x10] = self._counter
 
-        # ── Valores padrão simulados ──────────────────────────────────────────
-        portb = 0x20          # pino 13 (LED interno) em saída, igual ao padrão do Arduino
+        # ── Valores padrão simulados — espelham ula_avr_monitor_firmware após setup() ──
+        # D2-D6  = OUTPUT (LEDs)   → DDRD bits 2-6 = 1
+        # D7     = INPUT_PULLUP    → PORTD bit 7 = 1;  PIND bit 7 = 1 (chave aberta)
+        # D8-D10 = INPUT_PULLUP    → PORTB bits 0-2=1; PINB bits 0-2=1 (chaves abertas)
+        # D11    = INPUT           → PORTB bit 3 = 0;  PINB bit 3 = 0 (botão solto)
+        # D1(TX) = HIGH ocioso     → PORTD bit 1 = 1;  PIND bit 1 = 1
+        portb = 0x07    # D8/D9/D10 INPUT_PULLUP ativo (bits 0-2); D11 sem pull-up (bit 3=0)
         portc = 0x00
-        portd = 0x00
-        pinb, pinc, pind = portb, portc, portd
-        ddrb  = 0x7E          # D2-D6 (LEDs) + D13 como saída
+        portd = 0x82    # D7 INPUT_PULLUP (bit 7) + TX ocioso (bit 1); bits 2-6 atualizados abaixo
+        pinb  = 0x07    # chaves D8/D9/D10 abertas (HIGH); botão D11 solto (LOW)
+        pinc  = 0x00
+        pind  = 0x83    # D7 aberto (bit 7) + TX (bit 1) + RX (bit 0) em repouso
+        ddrb  = 0x00    # D8-D11 todos como INPUT (nenhum LED em PORTB na ULA)
         ddrc  = 0x00
-        ddrd  = 0x7C          # D2-D6 como saída
+        ddrd  = 0x7C    # D2-D6 como OUTPUT para LEDs (bits 2-6 = 1)
         adc: Dict[str, int] = {
             "A0": int(512 + 511 * math.sin(t)),
             "A1": int(512 + 511 * math.cos(t * 1.3)),
@@ -268,9 +275,10 @@ class FakeSerialClient(BaseClient):
         self._sram[0x04] = ula_op
         self._sram[0x05] = ula_estado
 
-        # Atualiza PORTD com estado dos LEDs (D2-D5 = resultado, D6 = carry)
+        # Atualiza PORTD e PIND com estado dos LEDs (D2-D5 = resultado, D6 = carry)
         led_bits = ((ula_result & 0xF) << 2) | (ula_carry << 6)
-        portd = (portd & 0x83) | led_bits   # preserva bits 0,1,7
+        portd = (portd & 0x83) | led_bits   # preserva bits 0,1,7 (RX, TX, D7 pull-up)
+        pind  = (pind  & 0x83) | led_bits   # pinos OUTPUT espelham PORT em PIND
 
         # ── Lê blocos reais das arrays ────────────────────────────────────────
         sram_phys    = SRAM_BASE + self._sram_offset
@@ -318,6 +326,7 @@ class FakeSerialClient(BaseClient):
                 addr_y="0x0101",
                 addr_result="0x0102",
                 addr_carry="0x0103",
+                addr_op="0x0104",
             ),
         )
 

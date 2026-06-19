@@ -16,6 +16,7 @@ from .formatters import (
     format_hex_dump,
     parse_hex_addr,
     to_bits,
+    ula_memory_check,
 )
 from .models import AVRSnapshot, ULASnapshot
 from .serial_client import make_client
@@ -249,6 +250,47 @@ def _ula_panel(snap: AVRSnapshot, log: List[str]) -> Panel:
     return Panel(content, title="[bold]ULA 4 bits[/bold]", border_style=color)
 
 
+def _ula_memcheck_panel(snap: AVRSnapshot) -> Panel:
+    """Confere se a janela atual do dump de SRAM cobre os endereços da ULA."""
+    check = ula_memory_check(snap)
+    if check is None:
+        return Panel("[dim]sem dados[/dim]", title="Verificação SRAM ↔ ULA")
+
+    win = f"0x{check['window_start']:04X} – 0x{check['window_end']:04X}"
+
+    if not check["any_in_window"]:
+        body = (
+            f"[dim]Janela atual do dump: {win}[/dim]\n\n"
+            "[yellow]⏳ Nenhum endereço da ULA está na janela atual.[/yellow]\n"
+            "Aguarde a varredura rotativa alcançar [bold]0x0100–0x0105[/bold]."
+        )
+        return Panel(body, title="[bold]Verificação SRAM ↔ ULA[/bold]", border_style="yellow")
+
+    t = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
+    t.add_column("Variável", width=8)
+    t.add_column("Endereço", width=9)
+    t.add_column("Campo ula.*", width=12, justify="right")
+    t.add_column("Lido na SRAM", width=13, justify="right")
+    t.add_column("Status", width=10)
+
+    all_ok = True
+    for f in check["fields"]:
+        if f["in_window"]:
+            ok = f["match"]
+            all_ok = all_ok and ok
+            status = Text("✔ OK", style="bold green") if ok else Text("✘ DIVERGE", style="bold red")
+            lido = str(f["actual"])
+        else:
+            status = Text("fora da janela", style="dim")
+            lido = "—"
+        t.add_row(f["name"], f"0x{f['addr']:04X}", str(f["expected"]), lido, status)
+
+    color = "green" if all_ok else "red"
+    panel = Panel(t, title="[bold]Verificação SRAM ↔ ULA[/bold]", border_style=color,
+                  subtitle=f"[dim]janela: {win}[/dim]")
+    return panel
+
+
 # ── Layouts ───────────────────────────────────────────────────────────────────
 
 def _header_panel(snap: AVRSnapshot, fake: bool) -> Panel:
@@ -267,6 +309,7 @@ def build_layout(snap: AVRSnapshot, fake: bool, ula_log: List[str] | None = None
     root.add_row(_header_panel(snap, fake))
     if snap.ula is not None:
         root.add_row(_ula_panel(snap, ula_log or []))
+        root.add_row(_ula_memcheck_panel(snap))
     root.add_row(Columns([_reg_table(snap), _timer_table(snap)]))
     root.add_row(_adc_table(snap))
     root.add_row(_sreg_table(snap))
@@ -281,6 +324,7 @@ def build_ula_only(snap: AVRSnapshot, fake: bool, ula_log: List[str] | None = No
     root.add_row(_header_panel(snap, fake))
     if snap.ula is not None:
         root.add_row(_ula_panel(snap, ula_log or []))
+        root.add_row(_ula_memcheck_panel(snap))
     else:
         root.add_row(Panel(
             "[dim]Aguardando dados da ULA...\n"
@@ -302,7 +346,20 @@ def build_ula_only(snap: AVRSnapshot, fake: bool, ula_log: List[str] | None = No
               help="Mostra apenas o painel ULA (sem registradores/ADC/memória).")
 def main(port: str, baud: int, fake: bool, interval: float, ula_only: bool) -> None:
     """Monitor de registradores AVR do Arduino Uno."""
-    client = make_client(fake=fake, port=port, baud=baud, interval=interval)
+    if not fake:
+        console.print(f"[dim]Conectando à porta {port} @ {baud} baud...[/dim]")
+    try:
+        client = make_client(fake=fake, port=port, baud=baud, interval=interval)
+    except Exception as exc:
+        console.print(f"[bold red]Erro ao abrir a porta {port}:[/bold red] {exc}")
+        console.print(
+            "[dim]Causas comuns: porta errada, Arduino IDE/Monitor Serial ainda "
+            "aberto na mesma porta, ou permissão (grupo dialout).[/dim]"
+        )
+        raise SystemExit(1)
+
+    if not fake:
+        console.print("[dim]Conectado. Aguardando primeiro snapshot...[/dim]")
 
     ula_log: List[str] = []
     prev_estado: int   = -1   # -1 = ainda não recebeu nenhum frame

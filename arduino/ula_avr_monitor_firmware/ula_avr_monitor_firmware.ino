@@ -48,7 +48,7 @@
 #define POT_PIN   A0
 
 // ── Constantes ───────────────────────────────────────────────────────────────
-#define BLOCK_SIZE    16u
+#define BLOCK_SIZE    64u   // ↑ de 16 para 64: varredura completa da SRAM em ~16s (era ~64s)
 #define SRAM_SIZE   2048u
 #define EEPROM_SIZE 1024u
 #define FLASH_SIZE 32768u
@@ -283,6 +283,7 @@ void send_snapshot() {
     Serial.print(F(",\"addr_y\":\"0x"));      printHex4((uint16_t)&ula_y);      Serial.print('"');
     Serial.print(F(",\"addr_result\":\"0x")); printHex4((uint16_t)&ula_result);  Serial.print('"');
     Serial.print(F(",\"addr_carry\":\"0x"));  printHex4((uint16_t)&ula_carry);   Serial.print('"');
+    Serial.print(F(",\"addr_op\":\"0x"));     printHex4((uint16_t)&ula_op);      Serial.print('"');
     Serial.print('}');
 
     Serial.println('}');   // fecha o JSON principal e emite '\n' (JSON Lines)
