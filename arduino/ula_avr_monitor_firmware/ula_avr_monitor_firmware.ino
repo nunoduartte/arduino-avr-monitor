@@ -313,56 +313,55 @@ void send_ack_error(const char* cmd, const __FlashStringHelper* err) {
     Serial.println(F("\"}"));
 }
 
+// Campos de estado partilhados por vários ACKs — imprime dentro de um JSON já aberto.
+void print_state_fields() {
+    Serial.print(F(",\"op\":"));             Serial.print(ula_op);
+    Serial.print(F(",\"op_name\":\""));      printOpName(ula_op); Serial.print('"');
+    Serial.print(F(",\"x\":"));              Serial.print(ula_x);
+    Serial.print(F(",\"y\":"));              Serial.print(ula_y);
+    Serial.print(F(",\"result\":"));         Serial.print(ula_result);
+    Serial.print(F(",\"carry\":"));          Serial.print(ula_carry);
+    Serial.print(F(",\"has_op\":"));         Serial.print(ula_has_op ? F("true") : F("false"));
+    Serial.print(F(",\"has_x\":"));          Serial.print(ula_has_x  ? F("true") : F("false"));
+    Serial.print(F(",\"has_y\":"));          Serial.print(ula_has_y  ? F("true") : F("false"));
+    Serial.print(F(",\"focus_field_name\":\""));
+    if      (ula_focus == FOCUS_OP) Serial.print(F("OP"));
+    else if (ula_focus == FOCUS_X)  Serial.print(F("X"));
+    else                            Serial.print(F("Y"));
+    Serial.print('"');
+    Serial.print(F(",\"state_version\":")); Serial.print(ula_version);
+}
+
 void send_ack_set_field(const char* field, int value) {
     Serial.print(F("{\"type\":\"ack\",\"cmd\":\"set_field\",\"ok\":true,\"field\":\""));
     Serial.print(field);
     Serial.print(F("\",\"value\":"));
     Serial.print(value);
+    print_state_fields();
     Serial.println(F("}"));
 }
 
 void send_ack_focus(const char* field) {
     Serial.print(F("{\"type\":\"ack\",\"cmd\":\"focus\",\"ok\":true,\"field\":\""));
     Serial.print(field);
-    Serial.println(F("\"}"));
+    print_state_fields();
+    Serial.println(F("}"));
 }
 
 void send_ack_reset() {
     Serial.println(F("{\"type\":\"ack\",\"cmd\":\"reset\",\"ok\":true}"));
 }
 
-void send_ack_compute(bool ok, const __FlashStringHelper* err_p,
-                      const __FlashStringHelper* missing_p) {
-    if (ok) {
-        Serial.print(F("{\"type\":\"ack\",\"cmd\":\"compute_current\",\"ok\":true"));
-        Serial.print(F(",\"op\":"));      Serial.print(ula_op);
-        Serial.print(F(",\"op_name\":\"")); printOpName(ula_op); Serial.print('"');
-        Serial.print(F(",\"x\":"));       Serial.print(ula_x);
-        Serial.print(F(",\"y\":"));       Serial.print(ula_y);
-        Serial.print(F(",\"result\":"));  Serial.print(ula_result);
-        Serial.print(F(",\"carry\":"));   Serial.print(ula_carry);
-        Serial.println(F("}"));
-    } else {
-        Serial.print(F("{\"type\":\"ack\",\"cmd\":\"compute_current\",\"ok\":false,\"error\":\""));
-        Serial.print(err_p);
-        if (missing_p) {
-            Serial.print(F("\",\"missing\":["));
-            Serial.print(missing_p);
-            Serial.print(F("]"));
-        }
-        Serial.println(F("}"));
-    }
+void send_ack_compute_ok() {
+    Serial.print(F("{\"type\":\"ack\",\"cmd\":\"compute_current\",\"ok\":true"));
+    print_state_fields();
+    Serial.println(F("}"));
 }
 
 // ACK legado do comando "ula" (compat)
 void send_ack_ula_ok() {
     Serial.print(F("{\"type\":\"ack\",\"cmd\":\"ula\",\"ok\":true"));
-    Serial.print(F(",\"op\":"));        Serial.print(ula_op);
-    Serial.print(F(",\"op_name\":\"")); printOpName(ula_op); Serial.print('"');
-    Serial.print(F(",\"x\":"));         Serial.print(ula_x);
-    Serial.print(F(",\"y\":"));         Serial.print(ula_y);
-    Serial.print(F(",\"result\":"));    Serial.print(ula_result);
-    Serial.print(F(",\"carry\":"));     Serial.print(ula_carry);
+    print_state_fields();
     Serial.println('}');
 }
 
@@ -438,31 +437,20 @@ void handle_cmd_focus(const char* line) {
 }
 
 void handle_cmd_compute_current() {
-    // "effective has": o campo em foco tem valor vivo das chaves, conta como setado
-    uint8_t eff_op = ula_has_op || (ula_focus == FOCUS_OP && ula_estado == STATE_EDITING);
-    uint8_t eff_x  = ula_has_x  || (ula_focus == FOCUS_X  && ula_estado == STATE_EDITING);
-    uint8_t eff_y  = ula_has_y  || (ula_focus == FOCUS_Y  && ula_estado == STATE_EDITING);
-
-    if (eff_op && eff_x && eff_y) {
-        // Garante que todos os has_* ficam true (bloqueia reentrada das chaves)
-        ula_has_op = 1; ula_has_x = 1; ula_has_y = 1;
+    if (ula_has_op && ula_has_x && ula_has_y) {
         ula_source = SRC_API;
         ula_version++;
         compute_ula();
         ula_estado = STATE_RESULT;
         update_leds(ula_result, ula_carry);
-        send_ack_compute(true, nullptr, nullptr);
+        send_ack_compute_ok();
     } else {
-        // Monta lista dos campos faltantes
-        // Usa buffer estático — evita alocação dinâmica no AVR
         char missing[20];
         missing[0] = '\0';
         bool first = true;
-        if (!eff_op) { strcat(missing, "\"op\""); first = false; }
-        if (!eff_x)  { if (!first) strcat(missing, ","); strcat(missing, "\"x\""); first = false; }
-        if (!eff_y)  { if (!first) strcat(missing, ","); strcat(missing, "\"y\""); }
-
-        // Imprime ACK de erro diretamente (send_ack_compute não suporta string dinâmica)
+        if (!ula_has_op) { strcat(missing, "\"op\""); first = false; }
+        if (!ula_has_x)  { if (!first) strcat(missing, ","); strcat(missing, "\"x\""); first = false; }
+        if (!ula_has_y)  { if (!first) strcat(missing, ","); strcat(missing, "\"y\""); }
         Serial.print(F("{\"type\":\"ack\",\"cmd\":\"compute_current\",\"ok\":false"));
         Serial.print(F(",\"error\":\"missing_fields\",\"missing\":["));
         Serial.print(missing);
@@ -705,24 +693,26 @@ void loop() {
 
     // 3. Máquina de estados
     if (ula_estado == STATE_EDITING) {
-        // Atualiza live o campo em foco a partir das chaves (preview nos LEDs)
+        // Preview nos LEDs: mostra o valor ao vivo das chaves para o campo
+        // em foco — apenas visual, NÃO escreve em ula_op/x/y. Isso garante
+        // que valores gravados via set_field (API) não sejam sobrescritos
+        // a cada iteração do loop.
+        uint8_t preview;
         switch (ula_focus) {
-            case FOCUS_OP:
-                ula_op = sw_val & 0x07;
-                update_leds(ula_op, 0);
-                break;
-            case FOCUS_X:
-                ula_x = sw_val & 0x0F;
-                update_leds(ula_x, 0);
-                break;
-            case FOCUS_Y:
-                ula_y = sw_val & 0x0F;
-                update_leds(ula_y, 0);
-                break;
+            case FOCUS_OP: preview = sw_val & 0x07; break;
+            default:       preview = sw_val & 0x0F; break;
         }
+        update_leds(preview, 0);
 
         if (btn_event) {
             btn_event = false;
+            // Só aqui as chaves escrevem nas variáveis salvas
+            switch (ula_focus) {
+                case FOCUS_OP: ula_op = sw_val & 0x07; break;
+                case FOCUS_X:  ula_x  = sw_val & 0x0F; break;
+                case FOCUS_Y:  ula_y  = sw_val & 0x0F; break;
+            }
+            ula_source = SRC_HARDWARE;
             confirm_focus_and_advance();
         }
 

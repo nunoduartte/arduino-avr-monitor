@@ -374,6 +374,19 @@ class FakeSerialClient(BaseClient):
             return self._cmd_ula_compat(cmd)
         return {"type": "ack", "cmd": cmd_name, "ok": False, "error": "unknown_cmd"}
 
+    def _set_field_ack(self, field: str, value: int) -> Dict:
+        """ACK de set_field com estado completo — espelha print_state_fields() do firmware."""
+        return {
+            "type": "ack", "cmd": "set_field", "ok": True,
+            "field": field, "value": value,
+            "op": self._ula_op, "op_name": _ULA_OP_NAMES[self._ula_op],
+            "x": self._ula_x, "y": self._ula_y,
+            "result": self._ula_result, "carry": self._ula_carry,
+            "has_op": self._ula_has_op, "has_x": self._ula_has_x, "has_y": self._ula_has_y,
+            "focus_field_name": self._FOCUS_NAMES[self._ula_focus],
+            "state_version": self._ula_version,
+        }
+
     def _cmd_set_field(self, cmd: Dict) -> Dict:
         field = str(cmd.get("field", "")).lower()
         value = cmd.get("value")
@@ -388,7 +401,7 @@ class FakeSerialClient(BaseClient):
             self._ula_has_op = True
             self._ula_version += 1
             self._maybe_advance_focus(self._FOCUS_OP)
-            return {"type": "ack", "cmd": "set_field", "ok": True, "field": "op", "value": op_idx}
+            return self._set_field_ack("op", op_idx)
 
         if field in ("x", "y"):
             try:
@@ -401,12 +414,11 @@ class FakeSerialClient(BaseClient):
                 self._ula_x = v; self._ula_has_x = True
                 self._ula_version += 1
                 self._maybe_advance_focus(self._FOCUS_X)
-                return {"type": "ack", "cmd": "set_field", "ok": True, "field": "x", "value": v}
             else:
                 self._ula_y = v; self._ula_has_y = True
                 self._ula_version += 1
                 self._maybe_advance_focus(self._FOCUS_Y)
-                return {"type": "ack", "cmd": "set_field", "ok": True, "field": "y", "value": v}
+            return self._set_field_ack(field, v)
 
         return {"type": "ack", "cmd": "set_field", "ok": False, "error": "unknown_field"}
 
@@ -420,12 +432,7 @@ class FakeSerialClient(BaseClient):
         return {"type": "ack", "cmd": "focus", "ok": True, "field": field}
 
     def _cmd_compute_current(self) -> Dict:
-        eff_op = self._ula_has_op or (self._ula_focus == self._FOCUS_OP and self._ula_estado == 0)
-        eff_x  = self._ula_has_x  or (self._ula_focus == self._FOCUS_X  and self._ula_estado == 0)
-        eff_y  = self._ula_has_y  or (self._ula_focus == self._FOCUS_Y  and self._ula_estado == 0)
-
-        if eff_op and eff_x and eff_y:
-            self._ula_has_op = self._ula_has_x = self._ula_has_y = True
+        if self._ula_has_op and self._ula_has_x and self._ula_has_y:
             self._ula_source = "api"
             self._ula_version += 1
             self._demo_mode = False
@@ -435,12 +442,15 @@ class FakeSerialClient(BaseClient):
                 "op": self._ula_op, "op_name": _ULA_OP_NAMES[self._ula_op],
                 "x": self._ula_x, "y": self._ula_y,
                 "result": self._ula_result, "carry": self._ula_carry,
+                "has_op": True, "has_x": True, "has_y": True,
+                "focus_field_name": self._FOCUS_NAMES[self._ula_focus],
+                "state_version": self._ula_version,
             }
 
         missing = []
-        if not eff_op: missing.append("op")
-        if not eff_x:  missing.append("x")
-        if not eff_y:  missing.append("y")
+        if not self._ula_has_op: missing.append("op")
+        if not self._ula_has_x:  missing.append("x")
+        if not self._ula_has_y:  missing.append("y")
         return {
             "type": "ack", "cmd": "compute_current", "ok": False,
             "error": "missing_fields", "missing": missing,

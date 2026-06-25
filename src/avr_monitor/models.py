@@ -54,6 +54,12 @@ class UlaAck(BaseModel):
     # campos de set_field / focus
     field: Optional[str] = None
     value: Optional[int] = None
+    # estado completo incluído nos ACKs de set_field e compute_current
+    has_op: Optional[bool] = None
+    has_x: Optional[bool] = None
+    has_y: Optional[bool] = None
+    focus_field_name: Optional[str] = None
+    state_version: Optional[int] = None
     # erro
     error: Optional[str] = None
     missing: Optional[List[str]] = None
