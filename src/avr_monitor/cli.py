@@ -344,8 +344,34 @@ def build_ula_only(snap: AVRSnapshot, fake: bool, ula_log: List[str] | None = No
 @click.option("--interval",  default=0.5,             show_default=True, help="Intervalo de atualização (s).")
 @click.option("--ula-only",  is_flag=True, default=False,
               help="Mostra apenas o painel ULA (sem registradores/ADC/memória).")
-def main(port: str, baud: int, fake: bool, interval: float, ula_only: bool) -> None:
+@click.option(
+    "--send-ula", nargs=3, type=str, metavar="OP X Y", default=None,
+    help=(
+        "Envia um comando ULA (ex: --send-ula ADD 7 3), imprime o resultado "
+        "e sai — não abre o monitor contínuo. Equivalente a usar "
+        "ula_command.py, só que reaproveitando as opções --port/--baud/--fake."
+    ),
+)
+def main(
+    port: str, baud: int, fake: bool, interval: float, ula_only: bool,
+    send_ula: "tuple[str, str, str] | None",
+) -> None:
     """Monitor de registradores AVR do Arduino Uno."""
+    # ── Modo "comando único": envia, imprime, sai. Não entra no Live. ────────
+    if send_ula:
+        op, x_str, y_str = send_ula
+        client = make_client(fake=fake, port=port, baud=baud)
+        try:
+            ack = client.send_ula_command(op, int(x_str), int(y_str))
+        finally:
+            client.close()
+        if not ack.ok:
+            console.print(f"[bold red]Erro:[/bold red] {ack.error}")
+            raise SystemExit(1)
+        op_name = ack.op_name or str(ack.op)
+        console.print(f"{op_name} {ack.x} {ack.y} = {ack.result} carry={ack.carry}")
+        return
+
     if not fake:
         console.print(f"[dim]Conectando à porta {port} @ {baud} baud...[/dim]")
     try:

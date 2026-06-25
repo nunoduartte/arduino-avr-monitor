@@ -4,7 +4,9 @@ from pydantic import BaseModel, Field
 
 
 class ULASnapshot(BaseModel):
-    estado: int = 0           # 0=sel_op 1=entrada_x 2=entrada_y 3=aguarda 4=resultado
+    # Resultado / operandos
+    estado: int = 0           # 0=EDITING  4=RESULT
+    estado_name: str = "EDITING"
     op: int = 0               # índice da operação (0-7)
     op_name: str = "AND"      # AND OR NOT XOR ADD SUB MUL DIV
     op_code: str = "000"      # código binário de 3 bits (string, ex: "100")
@@ -12,12 +14,49 @@ class ULASnapshot(BaseModel):
     y: int = 0                # operando B (4 bits)
     result: int = 0           # resultado (4 bits)
     carry: int = 0            # carry/overflow (1 bit)
+
+    # Estado compartilhado API ↔ hardware
+    has_op: bool = False      # campo foi confirmado (API ou botão)
+    has_x: bool = False
+    has_y: bool = False
+    focus_field: int = 0      # 0=OP  1=X  2=Y  (hardware edita este campo agora)
+    focus_field_name: str = "OP"
+    last_input_source: str = "hardware"   # "hardware" | "api"
+    state_version: int = 0    # incrementa a cada mudança de campo
+
+    # Endereços de memória (debug)
     addr_estado: str = "0x0000"
     addr_x: str = "0x0000"
     addr_y: str = "0x0000"
     addr_result: str = "0x0000"
     addr_carry: str = "0x0000"
     addr_op: str = "0x0000"
+
+
+class UlaAck(BaseModel):
+    """
+    Resposta genérica a qualquer comando enviado pela serial.
+
+    `cmd` indica qual comando gerou este ACK ("ula", "set_field", "focus",
+    "compute_current", "reset"). Campos opcionais são preenchidos conforme
+    o tipo de resposta.
+    """
+    type: str = "ack"
+    cmd: str = "ula"
+    ok: bool = False
+    # campos de resultado (compute / ula)
+    op: Optional[int] = None
+    op_name: Optional[str] = None
+    x: Optional[int] = None
+    y: Optional[int] = None
+    result: Optional[int] = None
+    carry: Optional[int] = None
+    # campos de set_field / focus
+    field: Optional[str] = None
+    value: Optional[int] = None
+    # erro
+    error: Optional[str] = None
+    missing: Optional[List[str]] = None
 
 
 class PortsSnapshot(BaseModel):
