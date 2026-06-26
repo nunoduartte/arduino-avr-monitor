@@ -358,8 +358,38 @@ class FakeSerialClient(BaseClient):
 
     # ── Processamento de comandos ─────────────────────────────────────────────
 
-    def _process_command(self, cmd: Dict) -> Dict:
-        """Despacha o comando e retorna o dict de ACK correspondente."""
+    def _cmd_dump_memory(self, cmd: Dict) -> None:
+        """Enfileira mem_chunk + mem_done no _ack_queue."""
+        start      = int(cmd.get("start",      SRAM_BASE))
+        length     = int(cmd.get("length",     SRAM_SIZE))
+        chunk_size = int(cmd.get("chunk_size", 32))
+
+        start      = max(SRAM_BASE, min(start, SRAM_BASE + SRAM_SIZE - 1))
+        end        = min(start + length, SRAM_BASE + SRAM_SIZE)
+        length     = end - start
+        chunk_size = max(1, min(chunk_size, 64))
+
+        for offset in range(0, length, chunk_size):
+            chunk_start = start + offset
+            count       = min(chunk_size, length - offset)
+            idx         = chunk_start - SRAM_BASE
+            chunk_bytes = list(self._sram[idx : idx + count])
+            self._ack_queue.put({
+                "type":   "mem_chunk",
+                "memory": "sram",
+                "start":  f"0x{chunk_start:04X}",
+                "bytes":  chunk_bytes,
+            })
+
+        self._ack_queue.put({
+            "type":   "mem_done",
+            "memory": "sram",
+            "start":  f"0x{start:04X}",
+            "length": length,
+        })
+
+    def _process_command(self, cmd: Dict) -> Optional[Dict]:
+        """Despacha o comando. Retorna dict de ACK ou None (quando já enfileirou)."""
         cmd_name = str(cmd.get("cmd", "")).lower()
 
         if cmd_name == "set_field":
@@ -372,6 +402,9 @@ class FakeSerialClient(BaseClient):
             return self._cmd_reset()
         if cmd_name == "ula":
             return self._cmd_ula_compat(cmd)
+        if cmd_name in ("dump_memory", "dump_sram"):
+            self._cmd_dump_memory(cmd)
+            return None
         return {"type": "ack", "cmd": cmd_name, "ok": False, "error": "unknown_cmd"}
 
     def _set_field_ack(self, field: str, value: int) -> Dict:
@@ -637,7 +670,9 @@ class FakeSerialClient(BaseClient):
             time.sleep(self._interval)
 
     def send_raw_command(self, cmd: Dict) -> None:
-        self._ack_queue.put(self._process_command(cmd))
+        result = self._process_command(cmd)
+        if result is not None:
+            self._ack_queue.put(result)
 
 
 def make_client(

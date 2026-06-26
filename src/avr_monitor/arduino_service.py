@@ -37,12 +37,14 @@ class ArduinoService:
     ):
         self._client: BaseClient = make_client(fake=fake, port=port, baud=baud, interval=interval)
 
-        self._lock = threading.Lock()       # protege _latest_snapshot e _inflight
+        self._lock = threading.Lock()       # protege _latest_snapshot, _inflight e _active_dump
         self._cmd_lock = threading.Lock()   # garante um único comando "em voo" por vez
 
         self._latest_snapshot: Optional[AVRSnapshot] = None
         # _inflight: {"event": Event, "result": dict|None}
         self._inflight: Optional[Dict[str, Any]] = None
+        # _active_dump: {"buffer": dict[int,int], "event": Event, "error": str|None}
+        self._active_dump: Optional[Dict[str, Any]] = None
 
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -69,6 +71,10 @@ class ArduinoService:
                 self._handle_snapshot(msg)
             elif msg_type == "ack":
                 self._handle_ack(msg)
+            elif msg_type == "mem_chunk":
+                self._handle_mem_chunk(msg)
+            elif msg_type == "mem_done":
+                self._handle_mem_done(msg)
 
     def _handle_snapshot(self, msg: Dict) -> None:
         try:
@@ -84,6 +90,24 @@ class ArduinoService:
         if inflight is not None:
             inflight["result"] = msg
             inflight["event"].set()
+
+    def _handle_mem_chunk(self, msg: Dict) -> None:
+        with self._lock:
+            dump = self._active_dump
+        if dump is None:
+            return
+        try:
+            chunk_start = int(str(msg.get("start", "0x0000")), 16)
+            for i, b in enumerate(msg.get("bytes", [])):
+                dump["buffer"][chunk_start + i] = int(b) & 0xFF
+        except Exception:
+            pass
+
+    def _handle_mem_done(self, msg: Dict) -> None:
+        with self._lock:
+            dump = self._active_dump
+        if dump is not None:
+            dump["event"].set()
 
     # ── Leitura de estado (nunca toca a serial) ──────────────────────────────
 
@@ -148,3 +172,44 @@ class ArduinoService:
     def send_ula_compat(self, op: "int | str", x: int, y: int, timeout: float = 2.0) -> UlaAck:
         """Comando legado: seta op/x/y e calcula num único comando."""
         return self._send({"cmd": "ula", "op": op, "x": x, "y": y}, timeout)
+
+    # ── Dump de memória SRAM ────────────────────────────────────────────────────
+
+    def request_sram_dump(
+        self,
+        start: int = 0x0100,
+        length: int = 2048,
+        chunk_size: int = 32,
+        timeout_seconds: float = 10.0,
+    ) -> "dict[int, int]":
+        """
+        Envia dump_memory ao Arduino e coleta todos os chunks.
+        Retorna mapa {endereço_absoluto: byte}.
+        Garante exclusão mútua via _cmd_lock.
+        """
+        with self._cmd_lock:
+            event = threading.Event()
+            dump_state: Dict[str, Any] = {
+                "buffer": {},
+                "event": event,
+                "error": None,
+            }
+            with self._lock:
+                self._active_dump = dump_state
+
+            self._client.send_raw_command({
+                "cmd": "dump_memory",
+                "memory": "sram",
+                "start": start,
+                "length": length,
+                "chunk_size": chunk_size,
+            })
+
+            got = event.wait(timeout_seconds)
+
+            with self._lock:
+                self._active_dump = None
+
+        if not got:
+            raise TimeoutError("SRAM dump timed out")
+        return dump_state["buffer"]

@@ -489,6 +489,62 @@ void handle_cmd_ula_compat(const char* line) {
     send_ack_ula_ok();
 }
 
+// ── Dump de memória SRAM ──────────────────────────────────────────────────────
+// Envia a SRAM em chunks de JSON Lines.  Não usa buffer grande — cada chunk
+// é impresso diretamente na serial.  Parâmetros opcionais via JSON:
+//   start (decimal, default 256 = 0x0100)
+//   length (default 2048)
+//   chunk_size (default 32, max 64)
+void handle_cmd_dump_memory(const char* line) {
+    uint16_t start      = SRAM_BASE;
+    uint16_t length     = SRAM_SIZE;
+    uint8_t  chunk_size = 32;
+
+    if (line != NULL) {
+        char tmp[8];
+        if (extractJsonValue(line, "start", tmp, sizeof(tmp))) {
+            long v = atol(tmp);
+            if (v >= (long)SRAM_BASE && v < (long)(SRAM_BASE + SRAM_SIZE))
+                start = (uint16_t)v;
+        }
+        if (extractJsonValue(line, "length", tmp, sizeof(tmp))) {
+            long v = atol(tmp);
+            if (v > 0 && v <= (long)SRAM_SIZE) length = (uint16_t)v;
+        }
+        if (extractJsonValue(line, "chunk_size", tmp, sizeof(tmp))) {
+            long v = atol(tmp);
+            if (v >= 1 && v <= 64) chunk_size = (uint8_t)v;
+        }
+    }
+
+    // Limita ao fim da SRAM (0x0900)
+    uint32_t end = (uint32_t)start + length;
+    if (end > (uint32_t)(SRAM_BASE + SRAM_SIZE))
+        end = (uint32_t)(SRAM_BASE + SRAM_SIZE);
+    length = (uint16_t)(end - start);
+
+    for (uint16_t offset = 0; offset < length; offset += chunk_size) {
+        uint16_t chunk_start = start + offset;
+        uint16_t remaining   = length - offset;
+        uint8_t  count       = (remaining < (uint16_t)chunk_size) ? (uint8_t)remaining : chunk_size;
+
+        Serial.print(F("{\"type\":\"mem_chunk\",\"memory\":\"sram\",\"start\":\"0x"));
+        printHex4(chunk_start);
+        Serial.print(F("\",\"bytes\":["));
+        for (uint8_t i = 0; i < count; i++) {
+            Serial.print(*((volatile uint8_t *)(chunk_start + i)));
+            if (i + 1 < count) Serial.print(',');
+        }
+        Serial.println(F("]}"));
+    }
+
+    Serial.print(F("{\"type\":\"mem_done\",\"memory\":\"sram\",\"start\":\"0x"));
+    printHex4(start);
+    Serial.print(F("\",\"length\":"));
+    Serial.print(length);
+    Serial.println('}');
+}
+
 void handle_command(const char* line) {
     char cmdVal[20];
     if (!extractJsonValue(line, "cmd", cmdVal, sizeof(cmdVal))) {
@@ -499,6 +555,8 @@ void handle_command(const char* line) {
     else if (strEqualsIgnoreCase(cmdVal, "compute_current"))handle_cmd_compute_current();
     else if (strEqualsIgnoreCase(cmdVal, "reset"))          handle_cmd_reset();
     else if (strEqualsIgnoreCase(cmdVal, "ula"))            handle_cmd_ula_compat(line);
+    else if (strEqualsIgnoreCase(cmdVal, "dump_memory"))    handle_cmd_dump_memory(line);
+    else if (strEqualsIgnoreCase(cmdVal, "dump_sram"))      handle_cmd_dump_memory(NULL);
     else    send_ack_error(cmdVal, F("unknown_cmd"));
 }
 

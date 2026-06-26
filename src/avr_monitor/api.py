@@ -24,11 +24,13 @@ import os
 from contextlib import asynccontextmanager
 from typing import Literal, Optional, Union
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .arduino_service import ArduinoService
+from .sram_report import generate_sram_pdf_report, _parse_addr
 
 _FAKE = os.environ.get("AVR_MONITOR_FAKE", "0") == "1"
 _PORT = os.environ.get("AVR_MONITOR_PORT", "/dev/ttyACM0")
@@ -158,6 +160,96 @@ def ula_reset() -> dict:
     """Zera todos os campos e volta ao estado EDITING com focus=OP."""
     ack = _service().reset()
     return ack.model_dump()
+
+
+@app.get("/api/report/sram-dump")
+def sram_dump_json(
+    start: int = Query(0x0100, ge=0x0100, le=0x08FF),
+    length: int = Query(2048, ge=1, le=2048),
+    chunk_size: int = Query(32, ge=1, le=64),
+    timeout: float = Query(10.0, gt=0),
+) -> dict:
+    """
+    Coleta a SRAM e retorna resumo JSON (sem os bytes brutos).
+    Útil para validar a coleta antes de gerar o PDF.
+    """
+    svc = _service()
+    try:
+        sram_map = svc.request_sram_dump(
+            start=start, length=length, chunk_size=chunk_size,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    snap = svc.get_state()
+    ula  = snap.ula if snap else None
+
+    special: dict = {}
+    if ula:
+        for field in ("addr_x", "addr_y", "addr_result", "addr_carry", "addr_op", "addr_estado"):
+            raw = getattr(ula, field, "0x0000")
+            addr = _parse_addr(raw)
+            label = field.replace("addr_", "")
+            special[label] = f"0x{addr:04X}"
+
+    return {
+        "start":            f"0x{start:04X}",
+        "length":           length,
+        "bytes_collected":  len(sram_map),
+        "special_addresses": special,
+    }
+
+
+@app.get("/api/report/sram.pdf")
+def sram_pdf(
+    start: int = Query(0x0100, ge=0x0100, le=0x08FF),
+    length: int = Query(2048, ge=1, le=2048),
+    chunk_size: int = Query(32, ge=1, le=64),
+    timeout: float = Query(10.0, gt=0),
+) -> Response:
+    """
+    Gera e retorna o relatório PDF da SRAM.
+    Os bytes da ULA são destacados com cores no dump hexadecimal.
+    """
+    svc = _service()
+    try:
+        sram_map = svc.request_sram_dump(
+            start=start, length=length, chunk_size=chunk_size,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    snap = svc.get_state()
+    ula  = snap.ula if snap else None
+
+    ula_addresses: dict = {}
+    if ula:
+        for field in ("addr_x", "addr_y", "addr_result", "addr_carry", "addr_op", "addr_estado"):
+            raw = getattr(ula, field, "0x0000")
+            ula_addresses[field] = _parse_addr(raw)
+
+    try:
+        pdf_bytes = generate_sram_pdf_report(
+            sram_map=sram_map,
+            ula_addresses=ula_addresses,
+            latest_snapshot=snap,
+            start=start,
+            length=length,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="sram-ula-report.pdf"'},
+    )
 
 
 @app.post("/api/ula")

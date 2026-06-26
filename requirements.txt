@@ -6,3 +6,4 @@ pydantic>=2.0
 click>=8.1
 fastapi>=0.110
 uvicorn[standard]>=0.29
+reportlab>=4.0
