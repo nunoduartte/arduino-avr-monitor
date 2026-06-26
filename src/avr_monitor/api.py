@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 from typing import Literal, Optional, Union
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .arduino_service import ArduinoService
@@ -48,6 +49,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AVR Monitor API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── Modelos de request ────────────────────────────────────────────────────────
